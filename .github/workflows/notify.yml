@@ -2,6 +2,15 @@ name: telegram release notify
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag (empty = latest)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
 
 jobs:
   notify:
@@ -9,17 +18,49 @@ jobs:
     steps:
       - name: send to telegram
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          NAME: ${{ github.event.release.name }}
-          URL: ${{ github.event.release.html_url }}
-          BODY: ${{ github.event.release.body }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
-          body=$(printf '%s' "$BODY" | esc | head -c 3500)
-          name=$(printf '%s' "$NAME" | esc)
-          text=$(printf '<b>%s</b>\n\n%s\n\n<a href="%s">view release</a>' "$name" "$body" "$URL")
-          jq -n --arg chat "$TG_CHAT_ID" --arg text "$text" \
-            '{chat_id:$chat, text:$text, parse_mode:"HTML", disable_web_page_preview:true}' \
-          | curl -s "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              -H "Content-Type: application/json" -d @-
+          python3 - <<'PY'
+          import os, re, json, html, subprocess, urllib.request
+
+          tag = os.environ.get("TAG", "")
+          cmd = ["gh", "release", "view"] + ([tag] if tag else []) + ["--json", "name,body,url,tagName"]
+          r = json.loads(subprocess.check_output(cmd))
+
+          def conv(line):
+              line = html.escape(line, quote=False)
+              line = re.sub(r"^\s*#{1,6}\s*(.+)$", r"<b>\1</b>", line)
+              line = re.sub(r"^(\s*)[-*]\s+", r"\1• ", line)
+              line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)",
+                            lambda m: '<a href="%s">%s</a>' % (m.group(2), m.group(1).replace("`", "")), line)
+              line = re.sub(r"`([^`]+)`", r"<code>\1</code>", line)
+              line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+              return line
+
+          footer = '\n<a href="%s">view release</a>' % r["url"]
+          out = ["<b>%s</b>" % html.escape(r["name"] or r["tagName"]), ""]
+          size = sum(len(x) + 1 for x in out)
+          for l in (r["body"] or "").replace("\r", "").split("\n"):
+              c = conv(l)
+              if size + len(c) + len(footer) > 3900:
+                  out.append("…")
+                  break
+              out.append(c)
+              size += len(c) + 1
+          text = "\n".join(out) + footer
+
+          data = json.dumps({
+              "chat_id": os.environ["TG_CHAT_ID"],
+              "text": text,
+              "parse_mode": "HTML",
+              "disable_web_page_preview": True,
+          }).encode()
+          req = urllib.request.Request(
+              "https://api.telegram.org/bot%s/sendMessage" % os.environ["TG_TOKEN"],
+              data, {"Content-Type": "application/json"})
+          print(urllib.request.urlopen(req).read().decode())
+          PY
