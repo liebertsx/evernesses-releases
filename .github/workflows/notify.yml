@@ -1,0 +1,25 @@
+name: telegram release notify
+on:
+  release:
+    types: [published]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: send to telegram
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          NAME: ${{ github.event.release.name }}
+          URL: ${{ github.event.release.html_url }}
+          BODY: ${{ github.event.release.body }}
+        run: |
+          esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+          body=$(printf '%s' "$BODY" | esc | head -c 3500)
+          name=$(printf '%s' "$NAME" | esc)
+          text=$(printf '<b>%s</b>\n\n%s\n\n<a href="%s">view release</a>' "$name" "$body" "$URL")
+          jq -n --arg chat "$TG_CHAT_ID" --arg text "$text" \
+            '{chat_id:$chat, text:$text, parse_mode:"HTML", disable_web_page_preview:true}' \
+          | curl -s "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" -d @-
